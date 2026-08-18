@@ -7,6 +7,14 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type'
 };
 
+async function updateMeta(store) {
+  try {
+    const meta = await store.get('meta', { type: 'json', consistency: 'strong' }) || {};
+    meta.lastModified = Date.now();
+    await store.set('meta', JSON.stringify(meta));
+  } catch(e) { /* meta 更新失败不影响主流程 */ }
+}
+
 export async function onRequest({ request }) {
   if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
 
@@ -37,6 +45,7 @@ export async function onRequest({ request }) {
     try {
       const body = await request.json();
       await store.set('mql', JSON.stringify(body));
+      await updateMeta(store);
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS }
