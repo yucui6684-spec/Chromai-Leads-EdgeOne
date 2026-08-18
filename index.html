@@ -380,9 +380,11 @@ const SYNC_ENABLED = typeof fetch !== 'undefined'; // 浏览器支持 fetch 才�
 var _autoSeedDone = false; // 防止重复自动种子推送
 let lastSyncTime = 0;     // 上次服务器同步时间戳
 let lastPushTime = parseInt(localStorage.getItem('chromai_lastPush') || '0'); // 上次推送时间戳（防止刷新时旧数据覆盖）
+let lastServerModified = 0;  // 服务器数据最后修改时间戳（用于检测他人更新）
 let serverSyncing = false; // 正在从服务器同步中（避免循环）
 let autoSyncTimer = null;  // 自动同步定时器（debounce）
 let serverOnline = false;  // 服务器是否在线
+let pollTimer = null;      // 轻量级轮询定时器
 
 // ---- 自动同步（编辑后 2 秒自动推送）----
 function scheduleAutoSync() {
@@ -397,10 +399,10 @@ function scheduleAutoSync() {
 // ---- 服务器同步：拉取 ----
 async function syncFromServer() {
   if (!SYNC_ENABLED) return false;
-  // 推送后 60 秒内不拉取，防止 Blob 存储最终一致性导致旧数据覆盖
-  if (lastPushTime && (Date.now() - lastPushTime < 60000)) {
+  // 推送后 8 秒内不拉取，防止 Blob 存储最终一致性导致旧数据覆盖
+  if (lastPushTime && (Date.now() - lastPushTime < 8000)) {
     var syncElP = document.getElementById('syncStatus');
-    if (syncElP) syncElP.textContent = '🟢 同步保护中 ' + Math.ceil((60000 - (Date.now() - lastPushTime)) / 1000) + 's';
+    if (syncElP) syncElP.textContent = '🟢 同步保护中 ' + Math.ceil((8000 - (Date.now() - lastPushTime)) / 1000) + 's';
     return false;
   }
   try {
@@ -448,6 +450,11 @@ async function syncFromServer() {
       serverOnline = true;
       // 同时更新本地缓存
       saveData();
+      // 获取服务器版本戳，作为后续轮询比对的基线
+      try {
+        const info = await fetch(API_BASE + '/api/status').then(r => r.json());
+        if (info && info.lastModified) lastServerModified = info.lastModified;
+      } catch(e2) {}
     }
     // 更新同步状态
     var syncEl = document.getElementById('syncStatus');
@@ -501,6 +508,8 @@ async function syncToServer() {
     lastSyncTime = Date.now();
     lastPushTime = Date.now(); // 记录推送时间，防止刷新时旧数据覆盖
     localStorage.setItem('chromai_lastPush', String(lastPushTime));
+    // 更新本地版本戳，避免下一轮轮询触发不必要的全量拉取
+    lastServerModified = Date.now();
     serverOnline = true;
     // 更新同步状态显示
     var syncEl = document.getElementById('syncStatus');
@@ -513,16 +522,46 @@ async function syncToServer() {
   }
 }
 
-// ---- 定时拉取服务器更新（每 15 秒）----
+// ---- 轻量级版本检测轮询（每 5 秒检查 status，有变化才全量拉取）----
 setInterval(function() {
-  if (serverSyncing || isDirty) return; // 正在编辑时不拉取
-  syncFromServer().then(function(updated) {
-    if (updated) {
-      updateHeaderStats();
-      render();
+  if (!SYNC_ENABLED || serverSyncing) return;
+  // 推送保护期内跳过
+  if (lastPushTime && (Date.now() - lastPushTime < 8000)) return;
+  // 正在编辑单元格时不拉取（避免打断）
+  if (editingCell) return;
+
+  // 第一步：轻量级 status 检查（只返回 lastModified + 计数，不传大量数据）
+  fetch(API_BASE + '/api/status').then(r => r.json()).then(function(info) {
+    if (!info || !info.blobReady) return;
+    serverOnline = true;
+    var syncEl = document.getElementById('syncStatus');
+    // 服务器返回的 lastModified 与本地不同 → 有人更新了数据
+    if (info.lastModified && info.lastModified !== lastServerModified) {
+      // 第二步：检测到变化，全量拉取数据
+      serverSyncing = true;
+      syncFromServer().then(function(updated) {
+        serverSyncing = false;
+        if (updated) {
+          lastServerModified = info.lastModified;
+          updateHeaderStats();
+          if (!isDirty && !editingCell) {
+            render();
+            toast('🔄 检测到他人更新，已同步', 'info');
+          } else {
+            // 用户有未保存修改，只更新数据不刷新界面
+            toast('📌 他人已更新数据，保存后可查看', 'info');
+          }
+        }
+      }).catch(function() { serverSyncing = false; });
+    } else if (syncEl) {
+      syncEl.textContent = '🟢 实时同步';
     }
+  }).catch(function() {
+    serverOnline = false;
+    var syncEl2 = document.getElementById('syncStatus');
+    if (syncEl2) syncEl2.textContent = '🟡 本地模式';
   });
-}, 15000);
+}, 5000);
 const LEADS_DEFAULT_HEADERS = ['线索编号','线索来源','活动名称','客户名称(脱敏)','联系人','职位','联系电话','邮箱','所属行业','地域','企业规模','当前阶段','线索评分(0-100)','负责人','负责大区','创建日期','备注'];
 const FUP_DEFAULT_HEADERS = ['跟进编号','线索编号','跟进日期','跟进方式','跟进内容','产品型号意向','预算范围(万元)','预算确认','采购时间窗','预计成交金额(万)','成交概率(%)','阶段变化','下一步计划','负责人','操作'];
 let LEADS_HEADERS = [...LEADS_DEFAULT_HEADERS];
